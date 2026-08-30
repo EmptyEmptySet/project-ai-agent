@@ -40,23 +40,32 @@ def main(argv: list[str] | None = None) -> int:
         config.max_iterations = args.max_iterations
 
     task = " ".join(args.task).strip()
-    if not task:
-        task = sys.stdin.read().strip()
-    if not task:
-        print("错误：未提供任务。示例：python main.py \"列出当前目录并写一个 hello.txt\"", file=sys.stderr)
-        return 2
 
     try:
         agent = get_agent(config)
-        result = agent.run(task)
     except (ValueError, AgentError) as exc:
-        print(f"运行失败：{exc}", file=sys.stderr)
-        return 1
+            print(f"运行失败：{exc}", file=sys.stderr)
+            return 1
+        
+    while(1):
+        try:
+            while not task:
+                task = sys.stdin.read().strip()
+                if not task:
+                    print("请提供任务。", file=sys.stderr)
+            if task == "quit":
+                return 0
+            result = agent.run(task)
+            task = ""
+        except (ValueError, AgentError) as exc:
+            print(f"运行失败：{exc}", file=sys.stderr)
+            return 1
 
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        _print_human(result)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            _print_human(result)
+            
     return 0
 
 
