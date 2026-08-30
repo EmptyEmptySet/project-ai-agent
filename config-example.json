@@ -1,0 +1,14 @@
+{
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-flash",
+  "api_key": "your-api-key",
+  "workdir": "workdir",
+  "max_iterations": 30,
+  "timeout": 120,
+  "offline": false,
+  "token_budget": 24000,
+  "max_tool_output_chars": 8000,
+  "provider_params": {
+    "temperature": 0.2
+  }
+}
