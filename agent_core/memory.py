@@ -104,8 +104,11 @@ class ConversationMemory:
         else:
             self.summarizer = lambda text: simple_summarize(text, self.summary_max_chars)
 
-        # 记录所有被压缩产生的摘要（机制：#3 记录所有摘要）
+        # 保存“激活窗口”内的摘要（机制：#3）：≤ max_summaries_in_context 条，
+        # 超出时会做“分层压缩”（telescoping，把最旧一组再合成 1 条），见 _condense_summaries。
         self.summaries: list[str] = []
+        # 触发“4 条合成 1 条”的次数（用于观察分层深度）
+        self.condense_count = 0
         self.messages: list[ConversationMessage] = []
         self._tool_call_seq = 0
 
@@ -119,6 +122,7 @@ class ConversationMemory:
         """重置为新会话：清空对话历史与所有摘要（机制：#1 reset/新会话）。"""
         self.messages = [ConversationMessage(role="system", content=self.system_prompt)]
         self.summaries = []
+        self.condense_count = 0
         self._tool_call_seq = 0
 
     def add_user(self, content: str) -> None:
@@ -147,11 +151,38 @@ class ConversationMemory:
         return len(self.summaries)
 
     # ------------------------------------------------------------------ #
-    # token 预算相关
+    # 摘要：写入 / 分层压缩 / 注入
     # ------------------------------------------------------------------ #
 
+    def _add_summary(self, summary: str) -> None:
+        """新增一条摘要，并在超过注入窗口上限时触发分层压缩。"""
+        text = (summary or "").strip()
+        if not text:
+            return
+        self.summaries.append(text)
+        self._condense_summaries()
+
+    def _condense_summaries(self) -> None:
+        """分层压缩（telescoping：4 条合成 1 条）。
+
+        当摘要条数超过 max_summaries_in_context 时，把“最旧的一组”（前 N 条）
+        再次压缩成 1 条更高层的摘要，使激活窗口始终 <= max_summaries_in_context。
+        这样既避免摘要无限膨胀，又能把更早的历史逐层凝结到更高层的摘要里。
+        """
+        n = max(1, self.max_summaries_in_context)
+        while len(self.summaries) > n:
+            group = self.summaries[:n]  # 最旧的一组
+            if len(group) < 2:
+                break
+            combined = "\n".join(f"[摘要] {s}" for s in group)
+            condensed = (self.summarizer(combined) or "").strip()
+            if not condensed:
+                break
+            self.summaries = [condensed] + self.summaries[n:]
+            self.condense_count += 1
+
     def _summaries_context(self) -> str:
-        """返回将要注入系统提示的摘要上下文文本（仅最近若干条）。"""
+        """返回将要注入系统提示的摘要上下文（激活窗口内 <= max_summaries_in_context 条）。"""
         if not self.summaries:
             return ""
         recent = self.summaries[-self.max_summaries_in_context:]
@@ -217,7 +248,7 @@ class ConversationMemory:
             return None
         summary = self._summarize_round(start, end)
         if summary and summary.strip():
-            self.summaries.append(summary)
+            self._add_summary(summary)
             del self.messages[start:end]
             return summary
         return None
@@ -243,7 +274,7 @@ class ConversationMemory:
             start, end = compressible[0]  # 最旧
             summary = self._summarize_round(start, end)
             if summary and summary.strip():
-                self.summaries.append(summary)
+                self._add_summary(summary)
                 del self.messages[start:end]
                 changed = True
             else:

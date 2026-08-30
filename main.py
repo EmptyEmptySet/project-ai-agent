@@ -18,6 +18,19 @@ from agent_core.agent import AgentError
 from agent_core.config import load_config
 
 
+def _ensure_utf8_streams() -> None:
+    """Windows 控制台常见编码为 GBK/OEM，强制 stdout/stderrstdin 用 UTF-8 显示中文。
+
+    在支持 UTF-8 的终端（Windows Terminal、设定 PYTHONUTF8=1）下可避免中文乱码；
+    若终端不支持 UTF-8，这里仅尝试，失败则静默忽略，不影响运行。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="编程智能体（coding agent）命令行入口")
     p.add_argument("task", nargs="*", help="要让 agent 完成的编程任务；不传则从 stdin 读取")
@@ -31,6 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    _ensure_utf8_streams()
 
     config = load_config(workdir_hint=args.workdir)
     if args.offline:
@@ -45,6 +59,13 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, AgentError) as exc:
         print(f"运行失败：{exc}", file=sys.stderr)
         return 1
+
+    if sys.stdin.isatty() and not task:
+        print(
+            "Mini Coding Agent 交互模式：直接输入任务并回车即可开始；"
+            "输入 -reset 开启新会话；输入 -quit 退出。",
+            file=sys.stderr,
+        )
 
     first = bool(task)
     while True:

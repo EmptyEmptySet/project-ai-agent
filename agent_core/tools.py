@@ -14,15 +14,42 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
-import stat
 import subprocess
-import threading
 from pathlib import Path
 from typing import Any, Callable
 
 # 单个工具器输出的最大字符数（防止上下文爆炸）
 _MAX_TOOL_OUTPUT = 12000
+
+# Windows 控制台 / cmd 默认用到的一些代码页（用于兼容子进程非 UTF-8 输出）
+_WIN_FALLBACK_ENCODINGS = ("gbk", "cp936", "mbcs", "cp1252")
+
+
+def _decode_output(data: bytes) -> str:
+    """解码子进程的字节输出，兼顾 UTF-8 与 Windows 常见代码页（避免中文乱码）。
+
+    Windows 的 cmd 内置命令（dir/type/echo 等）常用系统 OEM/GBK 代码页输出；
+    若直接按 UTF-8 解码会产生大量替换字符（乱码）。此函数先试 UTF-8，
+    若出现较多替换字符，再回退尝试 Windows 常见代码页。
+    """
+    if not data:
+        return ""
+    utf8 = data.decode("utf-8", errors="replace")
+    if utf8.count("\ufffd") == 0:
+        return utf8
+    best = utf8
+    best_bad = utf8.count("\ufffd")
+    for enc in _WIN_FALLBACK_ENCODINGS:
+        try:
+            s = data.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        bad = s.count("\ufffd")
+        if bad < best_bad:
+            best, best_bad = s, bad
+            if bad == 0:
+                break
+    return best
 
 
 class ToolError(Exception):
@@ -127,35 +154,35 @@ def _run_command(workdir: str, command: str, timeout: int = 60) -> str:
     resolved = Path(workdir).resolve()
     if not resolved.is_dir():
         raise ToolError(f"工作区不存在：{workdir}")
-    try:
-        args = list(shlex.split(command))
-    except ValueError as exc:
-        raise ToolError(f"命令解析失败：{exc}") from exc
-    if not args:
-        raise ToolError("命令为空。")
 
-    # 在 Windows 上 shlex 拆分后可直接作为 argv 传给 cmd；此处以 shell=True 保证兼容各平台。
+    # 不在此处用 shlex.split：Windows 命令的引号/反斜杠语义与 POSIX 不同，
+    # shlex 会误判合法命令为“解析失败”。直接按 command.strip() 校验即可，
+    # 具体解析交给 shell（cmd.exe）完成。注意不要用 shlex 拆分后重组命令。
     try:
         proc = subprocess.run(
             command,
             cwd=str(resolved),
             shell=True,
             capture_output=True,
-            text=True,
+            text=False,  # 取字节，自行按 UTF-8/Windows 代码页解码，避免中文乱码
             timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
+            # 关键：子进程使用空 stdin，禁止继承父进程 stdin。
+            # 否则 Windows 上 cmd.exe/子命令可能读取控制台输入，导致父进程交互循环
+            # 后续 sys.stdin 读到 EOF，出现“任务一结束就退出”的现象。
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         raise ToolError(f"命令执行超时（>{timeout}s）。") from None
     except OSError as exc:
         raise ToolError(f"命令启动失败：{exc}") from exc
 
+    out = _decode_output(proc.stdout)
+    err = _decode_output(proc.stderr)
     parts: list[str] = []
-    if proc.stdout and proc.stdout.strip():
-        parts.append("[stdout]\n" + proc.stdout.rstrip())
-    if proc.stderr and proc.stderr.strip():
-        parts.append("[stderr]\n" + proc.stderr.rstrip())
+    if out and out.strip():
+        parts.append("[stdout]\n" + out.rstrip())
+    if err and err.strip():
+        parts.append("[stderr]\n" + err.rstrip())
     parts.append(f"[exit_code] {proc.returncode}")
     body = "\n".join(parts) if parts else "(无输出)"
     return _truncate(body)
