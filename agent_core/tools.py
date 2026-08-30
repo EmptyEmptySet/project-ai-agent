@@ -173,6 +173,16 @@ def _bind(fn: Callable[..., str], workdir: str):
     return wrapper
 
 
+def _run_command_binding(workdir: str, command_timeout: int):
+    """为 run_command 绑定默认超时：模型未传 timeout 时使用配置的命令超时。"""
+    def wrapper(args: dict[str, Any]) -> str:
+        merged = dict(args or {})
+        merged.setdefault("timeout", command_timeout)
+        return _run_command(workdir, **merged)  # type: ignore[arg-type]
+
+    return wrapper
+
+
 TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -253,15 +263,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
 TOOL_REGISTRY: dict[str, Callable[[dict[str, Any]], str]] = {}
 
 
-def bind_tools(workdir: str) -> dict[str, Callable[[dict[str, Any]], str]]:
-    """将工具与指定工作区绑定，生成 工具名->执行函数 的注册表。"""
+def bind_tools(
+    workdir: str,
+    output_limit: int = _MAX_TOOL_OUTPUT,
+    command_timeout: int = 60,
+) -> dict[str, Callable[[dict[str, Any]], str]]:
+    """将工具与指定工作区绑定，生成 工具名->执行函数 的注册表。
+
+    - output_limit：单个工具输出最大字符数（配置 max_tool_output_chars）；
+    - command_timeout：shell 命令默认超时（配置 command_timeout）。
+    """
     return {
-        "read_file": _bind(_read_file, workdir),
-        "write_file": _bind(_write_file, workdir),
-        "list_dir": _bind(_list_dir, workdir),
-        "search_dir": _bind(_search_dir, workdir),
-        "run_command": _bind(_run_command, workdir),
+        "read_file": _limit(_bind(_read_file, workdir), output_limit),
+        "write_file": _limit(_bind(_write_file, workdir), output_limit),
+        "list_dir": _limit(_bind(_list_dir, workdir), output_limit),
+        "search_dir": _limit(_bind(_search_dir, workdir), output_limit),
+        "run_command": _limit(_run_command_binding(workdir, command_timeout), output_limit),
     }
+
+
+def _limit(fn: Callable[[dict[str, Any]], str], output_limit: int) -> Callable[[dict[str, Any]], str]:
+    """对工具输出结果做最终截断，确保遵守配置的输出长度上限。"""
+    def wrapper(args: dict[str, Any]) -> str:
+        return _truncate(fn(args), output_limit)
+
+    return wrapper
 
 
 def tool_schemas() -> list[dict[str, Any]]:
@@ -269,7 +295,12 @@ def tool_schemas() -> list[dict[str, Any]]:
     return TOOL_SPECS
 
 
-def execute_tool(registry: dict[str, Callable[[dict[str, Any]], str]], name: str, args: Any) -> str:
+def execute_tool(
+    registry: dict[str, Callable[[dict[str, Any]], str]],
+    name: str,
+    args: Any,
+    output_limit: int = _MAX_TOOL_OUTPUT,
+) -> str:
     """执行单个工具调用，统一进行参数校验与异常兜底。
 
     返回一个可放入 assistant 之后 role=tool 的字符串结果。
@@ -294,4 +325,4 @@ def execute_tool(registry: dict[str, Callable[[dict[str, Any]], str]], name: str
 
     if not isinstance(result, str):
         result = json.dumps(result, ensure_ascii=False, default=str)
-    return result
+    return _truncate(result, output_limit)

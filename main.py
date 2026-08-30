@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 from agent_core import get_agent
@@ -44,29 +43,42 @@ def main(argv: list[str] | None = None) -> int:
     try:
         agent = get_agent(config)
     except (ValueError, AgentError) as exc:
-            print(f"运行失败：{exc}", file=sys.stderr)
-            return 1
-        
-    while(1):
+        print(f"运行失败：{exc}", file=sys.stderr)
+        return 1
+
+    first = bool(task)
+    while True:
+        if first:
+            first = False  # 使用命令行传入的首条任务
+        else:
+            task = _read_prompt()
+        if not task:
+            return 0  # 无更多输入（EOF）→ 正常退出
+        if task == "-quit":
+            return 0
+        if task == "-reset":
+            agent.reset()
+            print("（已开启新会话，历史与摘要已清空）", file=sys.stderr)
+            continue
+
         try:
-            while not task:
-                task = sys.stdin.read().strip()
-                if not task:
-                    print("请提供任务。", file=sys.stderr)
-            if task == "quit":
-                return 0
             result = agent.run(task)
-            task = ""
         except (ValueError, AgentError) as exc:
             print(f"运行失败：{exc}", file=sys.stderr)
-            return 1
+            continue
 
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             _print_human(result)
-            
+
     return 0
+
+
+def _read_prompt() -> str:
+    """从 stdin 读取一行交互输入；EOF 时返回空字符串。"""
+    line = sys.stdin.readline()
+    return line.strip()
 
 
 def _print_human(result: dict) -> None:
